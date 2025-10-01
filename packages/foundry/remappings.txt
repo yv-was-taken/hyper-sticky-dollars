@@ -1,2 +1,2 @@
 @openzeppelin/contracts/=lib/openzeppelin-contracts/contracts
-  
+  @hyper-evm-lib=lib/hyper-evm-lib
