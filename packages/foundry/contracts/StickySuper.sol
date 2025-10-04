@@ -16,13 +16,20 @@ import "forge-std/console.sol";
 
 import {CoreWriterLib, HLConstants, HLConversions, PreCompileLib } from "@hyper-evm-lib/src/CoreWriterLib.sol";
 import { SafeTransferLib } from "@solmate/src/utils/SafeTransferLib.sol";
+import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
+import { Owned } from "@solmate/src/auth/Owned.sol";
+import { StickyUSD } from "./StickyUSD.sol";
 
-contract StickySuper {
+contract StickySuper is Owned {
   using SafeTransferLib for ERC20;
 
   error AmountTooSmall();
 
-  constructor(address _USDC) {
+  uint8 public nextStickyTokenIndex;
+
+  event StickyTokenCreated(uint8 indexed tokenIndex, address indexed tokenAddress, uint32 perpID, uint32 spotID);
+
+  constructor(address _USDC) Owned(msg.sender) {
     USDC = _USDC;
     HYPE = _HYPE;
     BTC = _BTC;
@@ -74,16 +81,36 @@ contract StickySuper {
 
   }
 
-  //@TODO
-  function redeemStickyToken(uint evmUsdcAmount, uint8 _stickyTokenIndex) {
+  function redeemStickyToken(uint tokenAmount, uint8 _stickyTokenIndex) {
+    if (tokenAmount < 2) revert AmountTooSmall();
 
+    address stickyRedeemContract = stickyUSDs[_stickyTokenIndex];
+
+    // Transfer sticky tokens from user to this contract
+    ERC20(stickyRedeemContract).safeTransferFrom(msg.sender, address(this), tokenAmount);
+
+    // Call redeem on StickyUSD - this handles closing positions and transferring USDC to user
+    StickyUSD(stickyRedeemContract).redeem(tokenAmount, msg.sender);
   }
 
   //deploy new StickyUSD contract, add to mapping
-  //@TODO
-  function createNewStickyToken() onlyOwner {
+  function createNewStickyToken(uint32 _perpID, uint32 _spotID) onlyOwner returns (uint8) {
+    // Deploy new StickyUSD contract
+    StickyUSD newStickyToken = new StickyUSD(address(this), _perpID, _spotID, USDC);
 
+    // Get current index
+    uint8 currentIndex = nextStickyTokenIndex;
 
+    // Add to mapping
+    stickyUSDs[currentIndex] = address(newStickyToken);
+
+    // Increment counter for next token
+    nextStickyTokenIndex++;
+
+    // Emit event
+    emit StickyTokenCreated(currentIndex, address(newStickyToken), _perpID, _spotID);
+
+    return currentIndex;
   } 
 
 }

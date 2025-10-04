@@ -6,14 +6,14 @@ import "forge-std/console.sol";
 import {CoreWriterLib, HLConstants, HLConversions, PreCompileLib } from "@hyper-evm-lib/src/CoreWriterLib.sol";
 import { SafeTransferLib } from "@solmate/src/utils/SafeTransferLib.sol";
 import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
+import { Owned } from "@solmate/src/auth/Owned.sol";
 
 
-contract StickyUSD is ERC20 {
+contract StickyUSD is ERC20, Owned {
   using SafeTransferLib for ERC20;
 
   //constants
   //
-  address stickySuper;
   address USDC_TOKEN_ADDRESS;
   uint32 ASSET_PERP_ID;
   uint32 ASSET_SPOT_ID;
@@ -25,18 +25,11 @@ contract StickyUSD is ERC20 {
   //@dev `_redeemAmount` differs from `_withdrawAmount` after accounting for fees and slippage
   event Redeem(address _token, address indexed _redeemer, uint64 _withdrawAmount, uint64 _redeemAmount);
 
-
-  error OnlyStickySuper();
-  modifier onlyStickySuper() {
-     if (msg.sender != stickySuper) revert OnlyStickySuper();
-     _;
-  }
-
   constructor(address _stickySuper, uint32 _perpID, uint32 _spotID, address _USDC_TOKEN_ADDRESS)
     ERC20("Sticky USD", "sUSD", 18)
+    Owned(_stickySuper)
   {
     USDC_TOKEN_ADDRESS = _USDC_TOKEN_ADDRESS;
-    stickySuper = _stickySuper;
     ASSET_PERP_ID = _perpID;
     ASSET_SPOT_ID = _spotID;
 
@@ -59,7 +52,7 @@ contract StickyUSD is ERC20 {
   //}
 
 
-  function mint(uint64 _coreAmount, address _recipient, ) onlyStickySuper {
+  function mint(uint64 _coreAmount, address _recipient, ) onlyOwner {
     //2. send half to perp
     uint64 usdcPerpAmount = HLConversions.weiToPerp(_coreAmount)/2;
     CoreWriterLib.transferUsdcClass(usdcPerpAmount, true);
@@ -99,7 +92,7 @@ contract StickyUSD is ERC20 {
     _mint(_recipient, mintAmount);
   }
 
-  function redeem(uint _tokenAmount, address _recipient) onlyStickySuper {
+  function redeem(uint _tokenAmount, address _recipient) onlyOwner {
     // Burn the user's tokens first
     _burn(msg.sender, _tokenAmount);
 
