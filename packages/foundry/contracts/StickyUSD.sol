@@ -5,9 +5,10 @@ import "forge-std/console.sol";
 
 import {CoreWriterLib, HLConstants, HLConversions, PreCompileLib } from "@hyper-evm-lib/src/CoreWriterLib.sol";
 import { SafeTransferLib } from "@solmate/src/utils/SafeTransferLib.sol";
+import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
 
 
-contract StickyUSD() is ERC20 {
+contract StickyUSD is ERC20 {
 
   //constants
   //
@@ -26,12 +27,14 @@ contract StickyUSD() is ERC20 {
 
   error OnlyStickySuper();
   modifier onlyStickySuper() {
-     if (msg.sender !== stickySuper) revert OnlyStickySuper();
+     if (msg.sender != stickySuper) revert OnlyStickySuper();
      _;
   }
 
-  constructor(address _stickySuper, uint32 _perpID, uint32 _spotID, _USDC_TOKEN_ADDRESS) {
-    _USDC_TOKEN_ADDRESS = USDC_TOKEN_ADDRESS;
+  constructor(address _stickySuper, uint32 _perpID, uint32 _spotID, address _USDC_TOKEN_ADDRESS)
+    ERC20("Sticky USD", "sUSD", 18)
+  {
+    USDC_TOKEN_ADDRESS = _USDC_TOKEN_ADDRESS;
     stickySuper = _stickySuper;
     ASSET_PERP_ID = _perpID;
     ASSET_SPOT_ID = _spotID;
@@ -92,7 +95,7 @@ contract StickyUSD() is ERC20 {
     uint netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
     uint mintAmount = HLConversions.weiToEvm(USDC_TOKEN_ADDRESS, netDiffInWei);
 
-    //@TODO call ERC20 mint here
+    _mint(_recipient, mintAmount);
   }
 
   function redeem() onlyStickySuper {
