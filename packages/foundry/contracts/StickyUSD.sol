@@ -9,6 +9,7 @@ import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
 
 
 contract StickyUSD is ERC20 {
+  using SafeTransferLib for ERC20;
 
   //constants
   //
@@ -98,8 +99,46 @@ contract StickyUSD is ERC20 {
     _mint(_recipient, mintAmount);
   }
 
-  function redeem() onlyStickySuper {
+  function redeem(uint _tokenAmount, address _recipient) onlyStickySuper {
+    // Burn the user's tokens first
+    _burn(msg.sender, _tokenAmount);
 
+    // Get positions before closing
+    (int64 perpPositionSizeBefore,,,,) = PreCompileLib.position(address(this), ASSET_PERP_ID);
+    (uint64 spotBalanceBefore,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+
+    // Calculate order sizes based on token amount being redeemed
+    uint64 coreAmount = uint64(HLConversions.evmToWei(USDC_TOKEN_ADDRESS, _tokenAmount));
+    uint64 spotOrderSize = HLConversions.weiToSz(ASSET_SPOT_ID, coreAmount);
+    uint64 perpOrderSize = HLConversions.weiToSz(ASSET_PERP_ID, coreAmount);
+
+    // Sell spot HYPE IOC at market (closing spot position)
+    CoreWriterLib.placeLimitOrder(ASSET_SPOT_ID, false, 1, spotOrderSize, false, 3, 0);
+
+    // Buy perp HYPE IOC at market (closing short perp position)
+    CoreWriterLib.placeLimitOrder(ASSET_PERP_ID, true, type(uint64).max, perpOrderSize, false, 3, 0);
+
+    // Get positions after closing
+    (int64 perpPositionSizeAfter,,,,) = PreCompileLib.position(address(this), ASSET_PERP_ID);
+    (uint64 spotBalanceAfter,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+
+    // Calculate actual differences (accounting for slippage)
+    int64 perpPositionSizeDiffBeforeAndAfter = perpPositionSizeBefore - perpPositionSizeAfter;
+    uint64 spotBalanceDiffBeforeAndAfter = spotBalanceBefore - spotBalanceAfter;
+
+    // Convert to wei to calculate total USDC to return
+    uint64 perpDiffAmountInWei = HLConversions.szToWei(ASSET_PERP_ID, perpPositionSizeDiffBeforeAndAfter);
+    uint64 spotDiffAmountInWei = HLConversions.szToWei(ASSET_SPOT_ID, spotBalanceDiffBeforeAndAfter);
+
+    uint netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
+
+    // Transfer USDC back from perp to core
+    uint64 usdcPerpAmount = HLConversions.weiToPerp(netDiffInWei) / 2;
+    CoreWriterLib.transferUsdcClass(usdcPerpAmount, false);
+
+    // Transfer USDC to recipient
+    uint withdrawAmount = HLConversions.weiToEvm(USDC_TOKEN_ADDRESS, netDiffInWei);
+    ERC20(USDC_TOKEN_ADDRESS).safeTransfer(_recipient, withdrawAmount);
   }
 
 }
