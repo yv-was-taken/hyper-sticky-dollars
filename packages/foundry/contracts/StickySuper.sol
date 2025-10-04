@@ -23,6 +23,8 @@ import { StickyUSD } from "./StickyUSD.sol";
 contract StickySuper is Owned {
   using SafeTransferLib for ERC20;
 
+  address USDC = ""; 
+
   error AmountTooSmall();
 
   uint8 public nextStickyTokenIndex;
@@ -36,17 +38,6 @@ contract StickySuper is Owned {
     ETH = _ETH;
   }
 
-
-
-  address USDC = ""; 
-  address HYPE = ""; 
-  address BTC = ""; 
-  address ETH = ""; 
-
-  address sHUSD = ""; 
-  address sBUSD = ""; 
-  address sEUSD = ""; 
-
   // @dev:
   // mapping that maps an index to the address for the deployed stickyUSD contract for the desired asset
   // each asset stablecoin has it's own contract so the margin can isolated for each asset into the designated contract address for the asset
@@ -55,6 +46,10 @@ contract StickySuper is Owned {
 
 
   function mintStickyToken(uint evmUsdcAmount, uint8 _stickyTokenIndex) {
+    console.log("=== MINT STICKY TOKEN START ===");
+    console.log("EVM USDC amount:", evmUsdcAmount);
+    console.log("Sticky token index:", _stickyTokenIndex);
+    console.log("Sender:", msg.sender);
 
     //@TODO add check ensuring stickyTokenIndex is valid mapping
 
@@ -63,52 +58,77 @@ contract StickySuper is Owned {
     // will have to test to figure out. may end up increasinng minimum order size constraint for this reason.
     if (evmUsdcAmount < 2) revert AmountTooSmall();
 
+    console.log("Transferring USDC from user to contract...");
     ERC20(USDC).safeTransferFrom(msg.sender, address(this), _amount);
 
-
-
+    console.log("Bridging to Core...");
     CoreWriterLib.bridgeToCore(USDC, evmUsdcAmount);
 
     uint64 tokenId = PrecompileLib.getTokenIndex(USDC);
     uint64 coreAmount = HLConversions.evmToWei(tokenId, evmAmount);
+    console.log("Token ID:", tokenId);
+    console.log("Core amount:", coreAmount);
 
     address stickyMintContract = stickyUSDs[_stickyTokenIndex];
+    console.log("Sticky mint contract:", stickyMintContract);
+    console.log("Sending spot to sticky contract...");
     CoreWriterLib.spotSend(stickyMintContract, tokenId, coreAmount);
 
     //@dev transferring position execution logic over to sticky hype usd token contract
     // in order for isolated margin in that account on the core side
+    console.log("Calling mint on sticky contract...");
     StickyUSD(stickyMintContract).mint(coreAmount, msg.sender);
+    console.log("=== MINT STICKY TOKEN END ===");
 
   }
 
   function redeemStickyToken(uint tokenAmount, uint8 _stickyTokenIndex) {
+    console.log("=== REDEEM STICKY TOKEN START ===");
+    console.log("Token amount:", tokenAmount);
+    console.log("Sticky token index:", _stickyTokenIndex);
+    console.log("Sender:", msg.sender);
+
     if (tokenAmount < 2) revert AmountTooSmall();
 
     address stickyRedeemContract = stickyUSDs[_stickyTokenIndex];
+    console.log("Sticky redeem contract:", stickyRedeemContract);
 
     // Transfer sticky tokens from user to this contract
+    console.log("Transferring sticky tokens from user...");
     ERC20(stickyRedeemContract).safeTransferFrom(msg.sender, address(this), tokenAmount);
 
     // Call redeem on StickyUSD - this handles closing positions and transferring USDC to user
+    console.log("Calling redeem on sticky contract...");
     StickyUSD(stickyRedeemContract).redeem(tokenAmount, msg.sender);
+    console.log("=== REDEEM STICKY TOKEN END ===");
   }
 
   //deploy new StickyUSD contract, add to mapping
   function createNewStickyToken(uint32 _perpID, uint32 _spotID) onlyOwner returns (uint8) {
+    console.log("=== CREATE NEW STICKY TOKEN START ===");
+    console.log("Perp ID:", _perpID);
+    console.log("Spot ID:", _spotID);
+
     // Deploy new StickyUSD contract
+    console.log("Deploying new StickyUSD contract...");
     StickyUSD newStickyToken = new StickyUSD(address(this), _perpID, _spotID, USDC);
+    console.log("New sticky token address:", address(newStickyToken));
 
     // Get current index
     uint8 currentIndex = nextStickyTokenIndex;
+    console.log("Current index:", currentIndex);
 
     // Add to mapping
     stickyUSDs[currentIndex] = address(newStickyToken);
+    console.log("Added to mapping");
 
     // Increment counter for next token
     nextStickyTokenIndex++;
+    console.log("Next index will be:", nextStickyTokenIndex);
 
     // Emit event
     emit StickyTokenCreated(currentIndex, address(newStickyToken), _perpID, _spotID);
+    console.log("=== CREATE NEW STICKY TOKEN END ===");
 
     return currentIndex;
   } 
