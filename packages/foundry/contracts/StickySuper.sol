@@ -14,16 +14,17 @@ pragma solidity >=0.8.0 <0.9.0;
 // Useful for debugging. Remove when deploying to a live network.
 import "forge-std/console.sol";
 
-import {CoreWriterLib, HLConstants, HLConversions, PreCompileLib } from "@hyper-evm-lib/src/CoreWriterLib.sol";
-import { SafeTransferLib } from "@solmate/src/utils/SafeTransferLib.sol";
-import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
-import { Owned } from "@solmate/src/auth/Owned.sol";
+import {CoreWriterLib, HLConstants, HLConversions} from "@hyper-evm-lib/src/CoreWriterLib.sol";
+import {PrecompileLib} from "@hyper-evm-lib/src/PrecompileLib.sol";
+import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
+import { ERC20 } from "solmate/tokens/ERC20.sol";
+import { Owned } from "solmate/auth/Owned.sol";
 import { StickyUSD } from "./StickyUSD.sol";
 
 contract StickySuper is Owned {
   using SafeTransferLib for ERC20;
 
-  address USDC = ""; 
+  address USDC; 
 
   error AmountTooSmall();
 
@@ -33,9 +34,6 @@ contract StickySuper is Owned {
 
   constructor(address _USDC) Owned(msg.sender) {
     USDC = _USDC;
-    HYPE = _HYPE;
-    BTC = _BTC;
-    ETH = _ETH;
   }
 
   // @dev:
@@ -45,7 +43,7 @@ contract StickySuper is Owned {
   mapping (uint8 => address) internal stickyUSDs;
 
 
-  function mintStickyToken(uint evmUsdcAmount, uint8 _stickyTokenIndex) {
+  function mintStickyToken(uint evmUsdcAmount, uint8 _stickyTokenIndex) public {
     console.log("=== MINT STICKY TOKEN START ===");
     console.log("EVM USDC amount:", evmUsdcAmount);
     console.log("Sticky token index:", _stickyTokenIndex);
@@ -59,13 +57,14 @@ contract StickySuper is Owned {
     if (evmUsdcAmount < 2) revert AmountTooSmall();
 
     console.log("Transferring USDC from user to contract...");
-    ERC20(USDC).safeTransferFrom(msg.sender, address(this), _amount);
+    ERC20(USDC).safeTransferFrom(msg.sender, address(this), evmUsdcAmount);
 
     console.log("Bridging to Core...");
     CoreWriterLib.bridgeToCore(USDC, evmUsdcAmount);
 
-    uint64 tokenId = PrecompileLib.getTokenIndex(USDC);
-    uint64 coreAmount = HLConversions.evmToWei(tokenId, evmAmount);
+    // USDC is token 0 - no conversion needed (6 decimals EVM = 8 decimals core for USDC)
+    uint64 tokenId = 0;
+    uint64 coreAmount = uint64(evmUsdcAmount) * 100; // Convert 6 decimals to 8 decimals
     console.log("Token ID:", tokenId);
     console.log("Core amount:", coreAmount);
 
@@ -82,7 +81,7 @@ contract StickySuper is Owned {
 
   }
 
-  function redeemStickyToken(uint tokenAmount, uint8 _stickyTokenIndex) {
+  function redeemStickyToken(uint tokenAmount, uint8 _stickyTokenIndex) public {
     console.log("=== REDEEM STICKY TOKEN START ===");
     console.log("Token amount:", tokenAmount);
     console.log("Sticky token index:", _stickyTokenIndex);
@@ -104,14 +103,13 @@ contract StickySuper is Owned {
   }
 
   //deploy new StickyUSD contract, add to mapping
-  function createNewStickyToken(uint32 _perpID, uint32 _spotID) onlyOwner returns (uint8) {
+  function createNewStickyToken(address _assetEvmAddress) public onlyOwner returns (uint8) {
     console.log("=== CREATE NEW STICKY TOKEN START ===");
-    console.log("Perp ID:", _perpID);
-    console.log("Spot ID:", _spotID);
+    console.log("Asset EVM address:", _assetEvmAddress);
 
-    // Deploy new StickyUSD contract
+    // Deploy new StickyUSD contract - it will derive all IDs from the EVM address
     console.log("Deploying new StickyUSD contract...");
-    StickyUSD newStickyToken = new StickyUSD(address(this), _perpID, _spotID, USDC);
+    StickyUSD newStickyToken = new StickyUSD(address(this), _assetEvmAddress, USDC);
     console.log("New sticky token address:", address(newStickyToken));
 
     // Get current index
@@ -126,8 +124,13 @@ contract StickySuper is Owned {
     nextStickyTokenIndex++;
     console.log("Next index will be:", nextStickyTokenIndex);
 
-    // Emit event
-    emit StickyTokenCreated(currentIndex, address(newStickyToken), _perpID, _spotID);
+    // Emit event with derived IDs
+    emit StickyTokenCreated(
+      currentIndex,
+      address(newStickyToken),
+      newStickyToken.ASSET_PERP_ID(),
+      newStickyToken.ASSET_SPOT_ID()
+    );
     console.log("=== CREATE NEW STICKY TOKEN END ===");
 
     return currentIndex;

@@ -3,18 +3,22 @@ pragma solidity >=0.8.0 <0.9.0;
 // Useful for debugging. Remove when deploying to a live network.
 import "forge-std/console.sol";
 
-import {CoreWriterLib, HLConstants, HLConversions, PreCompileLib } from "@hyper-evm-lib/src/CoreWriterLib.sol";
-import { SafeTransferLib } from "@solmate/src/utils/SafeTransferLib.sol";
-import { ERC20 } from "@solmate/src/tokens/ERC20.sol";
-import { Owned } from "@solmate/src/auth/Owned.sol";
+import {CoreWriterLib, HLConstants, HLConversions} from "@hyper-evm-lib/src/CoreWriterLib.sol";
+import {PrecompileLib} from "@hyper-evm-lib/src/PrecompileLib.sol";
+import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
+import { ERC20 } from "solmate/tokens/ERC20.sol";
+import { Owned } from "solmate/auth/Owned.sol";
 
 
 contract StickyUSD is ERC20, Owned {
   using SafeTransferLib for ERC20;
 
-  address USDC_TOKEN_ADDRESS;
-  uint32 ASSET_PERP_ID;
-  uint32 ASSET_SPOT_ID;
+  address public immutable USDC_TOKEN_ADDRESS;
+  address public immutable ASSET_EVM_ADDRESS;
+
+  uint64 public immutable ASSET_TOKEN_INDEX; // The underlying asset token index (e.g. HYPE = 150)
+  uint32 public immutable ASSET_PERP_ID;     // Perpetual market ID
+  uint32 public immutable ASSET_SPOT_ID;     // Spot asset ID (10000 + spot market index)
 
 
   //@dev `_mintAmount` differs from `_depositAmount` after accounting for fees and slippage
@@ -23,17 +27,47 @@ contract StickyUSD is ERC20, Owned {
   //@dev `_redeemAmount` differs from `_withdrawAmount` after accounting for fees and slippage
   event Redeem(address _token, address indexed _redeemer, uint64 _withdrawAmount, uint64 _redeemAmount);
 
-  constructor(address _stickySuper, uint32 _perpID, uint32 _spotID, address _USDC_TOKEN_ADDRESS)
+  constructor(
+    address _stickySuper,
+    address _assetEvmAddress,
+    address _usdcAddress
+  )
     ERC20("Sticky USD", "sUSD", 18)
     Owned(_stickySuper)
   {
-    USDC_TOKEN_ADDRESS = _USDC_TOKEN_ADDRESS;
-    ASSET_PERP_ID = _perpID;
-    ASSET_SPOT_ID = _spotID;
+    console.log("=== STICKY USD CONSTRUCTOR ===");
+    console.log("Asset EVM address:", _assetEvmAddress);
+    console.log("USDC address:", _usdcAddress);
 
+    // Store EVM addresses
+    USDC_TOKEN_ADDRESS = _usdcAddress;
+    ASSET_EVM_ADDRESS = _assetEvmAddress;
+
+    // Get token index from EVM address using TokenRegistry
+    ASSET_TOKEN_INDEX = uint64(PrecompileLib.getTokenIndex(_assetEvmAddress));
+    console.log("Token index:", ASSET_TOKEN_INDEX);
+
+    // Get spot market index for ASSET/USDC pair
+    uint64 spotMarketIndex = PrecompileLib.getSpotIndex(ASSET_TOKEN_INDEX);
+    console.log("Spot market index:", spotMarketIndex);
+
+    // Get SpotInfo to access token pair
+    PrecompileLib.SpotInfo memory spotInfo = PrecompileLib.spotInfo(spotMarketIndex);
+    console.log("Base token (from spotInfo):", spotInfo.tokens[0]);
+    console.log("Quote token (from spotInfo):", spotInfo.tokens[1]);
+
+    // Calculate spot asset ID (10000 + spot market index)
+    ASSET_SPOT_ID = uint32(10000 + spotMarketIndex);
+    console.log("Spot asset ID:", ASSET_SPOT_ID);
+
+    // For standard (non-builder-deployed) perps, perp ID equals spot market index
+    ASSET_PERP_ID = uint32(spotMarketIndex);
+    console.log("Perp ID:", ASSET_PERP_ID);
+
+    console.log("=== CONSTRUCTOR COMPLETE ===");
   }
 
-  function mint(uint64 _coreAmount, address _recipient, ) onlyOwner {
+  function mint(uint64 _coreAmount, address _recipient) public onlyOwner {
     console.log("=== MINT START ===");
     console.log("Core amount:", _coreAmount);
     console.log("Recipient:", _recipient);
@@ -41,26 +75,40 @@ contract StickyUSD is ERC20, Owned {
     //2. send half to perp
     uint64 usdcPerpAmount = HLConversions.weiToPerp(_coreAmount)/2;
     console.log("USDC perp amount:", usdcPerpAmount);
-    CoreWriterLib.transferUsdcClass(usdcPerpAmount, true);
+    CoreWriterLib.transferUsdClass(usdcPerpAmount, true);
 
-    (int64 perpPositionSizeBefore,,,,) = PreCompileLib.position(address(this),ASSET_PERP_ID);
-    (uint64 spotBalanceBefore,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    PrecompileLib.Position memory perpPosBefore = PrecompileLib.position(address(this), uint16(ASSET_PERP_ID));
+    PrecompileLib.SpotBalance memory spotBalBefore = PrecompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    int64 perpPositionSizeBefore = perpPosBefore.szi;
+    uint64 spotBalanceBefore = spotBalBefore.total;
     console.log("Perp position before:", uint64(perpPositionSizeBefore));
     console.log("Spot balance before:", spotBalanceBefore);
 
-    uint64 spotOrderSize = HLConversions.weiToSz(ASSET_SPOT_ID, _coreAmount);
-    uint64 perpOrderSize = HLConversions.weiToSz(ASSET_PERP_ID, _coreAmount);
+    // Get current prices to calculate order sizes
+    // spotPx expects spot market ID (asset - 10000), not full asset ID
+    uint64 spotPx = PrecompileLib.spotPx(ASSET_SPOT_ID - 10000);
+    uint64 markPx = PrecompileLib.markPx(uint16(ASSET_PERP_ID));
+
+    // Calculate HYPE amount from USDC: USDC_wei / price = HYPE_wei
+    // Then convert HYPE_wei to size
+    uint64 hypeAmountForSpot = (_coreAmount * 1e6) / spotPx; // price is in 1e6 format
+    uint64 hypeAmountForPerp = (_coreAmount * 1e6) / markPx;
+
+    uint64 spotOrderSize = HLConversions.weiToSz(ASSET_TOKEN_INDEX, hypeAmountForSpot);
+    uint64 perpOrderSize = HLConversions.weiToSz(ASSET_TOKEN_INDEX, hypeAmountForPerp);
     console.log("Spot order size:", spotOrderSize);
     console.log("Perp order size:", perpOrderSize);
 
-    console.log("Placing BUY spot order...");
+    console.log("Placing BUY spot order at market price...");
     CoreWriterLib.placeLimitOrder(ASSET_SPOT_ID, true, type(uint64).max, spotOrderSize, false, 3, 0);
 
-    console.log("Placing SELL perp order...");
-    CoreWriterLib.placeLimitOrder(ASSET_PERP_ID, false, 1, perpOrderSize, false, 3, 0);
+    console.log("Placing SHORT perp order at market price...");
+    CoreWriterLib.placeLimitOrder(ASSET_PERP_ID, false, 0, perpOrderSize, false, 3, 0);
 
-    (int64 perpPositionSizeAfter,,,,) = PreCompileLib.position(address(this),ASSET_PERP_ID);
-    (uint64 spotBalanceAfter,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    PrecompileLib.Position memory perpPosAfter = PrecompileLib.position(address(this), uint16(ASSET_PERP_ID));
+    PrecompileLib.SpotBalance memory spotBalAfter = PrecompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    int64 perpPositionSizeAfter = perpPosAfter.szi;
+    uint64 spotBalanceAfter = spotBalAfter.total;
     console.log("Perp position after:", uint64(perpPositionSizeAfter));
     console.log("Spot balance after:", spotBalanceAfter);
 
@@ -76,13 +124,14 @@ contract StickyUSD is ERC20, Owned {
     // - spotBalanceDiffBeforeAndAfter(ex, 0 before, 50 after = 50),
     // ...add them together, and that's your total to mint.
     // ...just remember to convert the value back to the evmAmount before minting.
-    uint64 perpDiffAmountInWei = HLConversions.szToWei(ASSET_PERP_ID, perpPositionSizeDiffBeforeAndAfter);
-    uint64 spotDiffAmountInWei = HLConversions.szToWei(ASSET_SPOT_ID, spotBalanceDiffBeforeAndAfter);
+    uint64 perpDiffAmountInWei = HLConversions.szToWei(ASSET_TOKEN_INDEX, uint64(perpPositionSizeDiffBeforeAndAfter));
+    uint64 spotDiffAmountInWei = HLConversions.szToWei(ASSET_TOKEN_INDEX, spotBalanceDiffBeforeAndAfter);
     console.log("Perp diff in wei:", perpDiffAmountInWei);
     console.log("Spot diff in wei:", spotDiffAmountInWei);
 
-    uint netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
-    uint mintAmount = HLConversions.weiToEvm(USDC_TOKEN_ADDRESS, netDiffInWei);
+    uint64 netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
+    // USDC is token 0 and doesn't need conversion (already in correct format)
+    uint mintAmount = netDiffInWei;
     console.log("Net diff in wei:", netDiffInWei);
     console.log("Mint amount:", mintAmount);
 
@@ -90,7 +139,7 @@ contract StickyUSD is ERC20, Owned {
     console.log("=== MINT END ===");
   }
 
-  function redeem(uint _tokenAmount, address _recipient) onlyOwner {
+  function redeem(uint _tokenAmount, address _recipient) public onlyOwner {
     console.log("=== REDEEM START ===");
     console.log("Token amount:", _tokenAmount);
     console.log("Recipient:", _recipient);
@@ -98,26 +147,31 @@ contract StickyUSD is ERC20, Owned {
     _burn(msg.sender, _tokenAmount);
     console.log("Burned tokens from:", msg.sender);
 
-    (int64 perpPositionSizeBefore,,,,) = PreCompileLib.position(address(this), ASSET_PERP_ID);
-    (uint64 spotBalanceBefore,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    PrecompileLib.Position memory perpPosBefore = PrecompileLib.position(address(this), uint16(ASSET_PERP_ID));
+    PrecompileLib.SpotBalance memory spotBalBefore = PrecompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    int64 perpPositionSizeBefore = perpPosBefore.szi;
+    uint64 spotBalanceBefore = spotBalBefore.total;
     console.log("Perp position before:", uint64(perpPositionSizeBefore));
     console.log("Spot balance before:", spotBalanceBefore);
 
-    uint64 coreAmount = uint64(HLConversions.evmToWei(USDC_TOKEN_ADDRESS, _tokenAmount));
+    // USDC is token 0 and doesn't need conversion (already in wei/core format)
+    uint64 coreAmount = uint64(_tokenAmount);
     uint64 spotOrderSize = HLConversions.weiToSz(ASSET_SPOT_ID, coreAmount);
     uint64 perpOrderSize = HLConversions.weiToSz(ASSET_PERP_ID, coreAmount);
     console.log("Core amount:", coreAmount);
     console.log("Spot order size:", spotOrderSize);
     console.log("Perp order size:", perpOrderSize);
 
-    console.log("Placing SELL spot order...");
-    CoreWriterLib.placeLimitOrder(ASSET_SPOT_ID, false, 1, spotOrderSize, false, 3, 0);
+    console.log("Placing SELL spot order at market price...");
+    CoreWriterLib.placeLimitOrder(ASSET_SPOT_ID, false, 0, spotOrderSize, false, 3, 0);
 
-    console.log("Placing BUY perp order...");
+    console.log("Placing LONG perp order at market price...");
     CoreWriterLib.placeLimitOrder(ASSET_PERP_ID, true, type(uint64).max, perpOrderSize, false, 3, 0);
 
-    (int64 perpPositionSizeAfter,,,,) = PreCompileLib.position(address(this), ASSET_PERP_ID);
-    (uint64 spotBalanceAfter,,) = PreCompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    PrecompileLib.Position memory perpPosAfter = PrecompileLib.position(address(this), uint16(ASSET_PERP_ID));
+    PrecompileLib.SpotBalance memory spotBalAfter = PrecompileLib.spotBalance(address(this), ASSET_SPOT_ID);
+    int64 perpPositionSizeAfter = perpPosAfter.szi;
+    uint64 spotBalanceAfter = spotBalAfter.total;
     console.log("Perp position after:", uint64(perpPositionSizeAfter));
     console.log("Spot balance after:", spotBalanceAfter);
 
@@ -126,19 +180,20 @@ contract StickyUSD is ERC20, Owned {
     console.log("Perp position diff:", uint64(perpPositionSizeDiffBeforeAndAfter));
     console.log("Spot balance diff:", spotBalanceDiffBeforeAndAfter);
 
-    uint64 perpDiffAmountInWei = HLConversions.szToWei(ASSET_PERP_ID, perpPositionSizeDiffBeforeAndAfter);
-    uint64 spotDiffAmountInWei = HLConversions.szToWei(ASSET_SPOT_ID, spotBalanceDiffBeforeAndAfter);
+    uint64 perpDiffAmountInWei = HLConversions.szToWei(ASSET_TOKEN_INDEX, uint64(perpPositionSizeDiffBeforeAndAfter));
+    uint64 spotDiffAmountInWei = HLConversions.szToWei(ASSET_TOKEN_INDEX, spotBalanceDiffBeforeAndAfter);
     console.log("Perp diff in wei:", perpDiffAmountInWei);
     console.log("Spot diff in wei:", spotDiffAmountInWei);
 
-    uint netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
+    uint64 netDiffInWei = perpDiffAmountInWei + spotDiffAmountInWei;
     console.log("Net diff in wei:", netDiffInWei);
 
     uint64 usdcPerpAmount = HLConversions.weiToPerp(netDiffInWei) / 2;
     console.log("Transferring USDC from perp to core:", usdcPerpAmount);
-    CoreWriterLib.transferUsdcClass(usdcPerpAmount, false);
+    CoreWriterLib.transferUsdClass(usdcPerpAmount, false);
 
-    uint withdrawAmount = HLConversions.weiToEvm(USDC_TOKEN_ADDRESS, netDiffInWei);
+    // USDC is token 0 and doesn't need conversion (already in correct format)
+    uint withdrawAmount = netDiffInWei;
     console.log("Withdraw amount:", withdrawAmount);
     console.log("Transferring USDC to recipient...");
     ERC20(USDC_TOKEN_ADDRESS).safeTransfer(_recipient, withdrawAmount);
